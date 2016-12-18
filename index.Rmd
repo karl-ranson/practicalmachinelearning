@@ -5,26 +5,186 @@ date: "18 December 2016"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE)
+
+library(caret)
+library(plyr)
+library(gbm)
+library(randomForest)
+library(lubridate)
+library(knitr)
+
 ```
 
-## R Markdown
+## Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+This Human Activity Recognition (HAR) report originates from this data source:  http://groupware.les.inf.puc-rio.br/har
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+This report covers:
+ * how the model was built, 
+ * how cross validation was conducted, 
+ * the expected out of sample error, and 
+ * why choices were made. 
+ 
+ 
+## Obtain data
 
-```{r cars}
-summary(cars)
+The testing data was obtained first. It is renamed 'validation' data as the training data will split into testing and training sub-sets.
+
+```{r downloaddata}
+destfil<- "./HARdatatesting.csv"
+if(!file.exists(destfil)){
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(fileUrl,destfile=destfil,method="auto")
+}
+validation <-  read.csv(destfil,na.strings = "NA") 
+
+# Set classes of training/test based on validation
+classesv <- sapply(validation, class)
+classest <- as.vector(classesv)
+classest[160]<- 'factor'
+names(classest[160])<- 'classe'
+
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+## Cleaning data
+
+As the classes of the Training dataset were sometimes not correctly labeled as numeric, the numeric variables in the Validation set were deemed correct.
+
+```{r clean}
+
+# remove columns with all NAs
+allNACols <- names(validation[,sapply(validation, function(x)all(is.na(x)))])
+
+# Load training/test set
+destfil<- "./HARdatatraining.csv"
+if(!file.exists(destfil)){
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(fileUrl,destfile=destfil,method="auto")
+}
+pml.training <-  read.csv(destfil,na.strings = "NA") 
+
+for (i in length(classest)) {
+  if (classest[i] == "numeric") {
+    pml.training[,i]<- as.numeric(pml.training[,i])}
+  }
+
+# Change time to useful format
+pml.training <- mutate(pml.training,cvtd_timestamp = raw_timestamp_part_1)
+class(pml.training$cvtd_timestamp) <-c('POSIXt','POSIXct')
+
+```
+The raw training dataset has 19622 rows and 160 columns.
+
+
+## Inspecting & removing useless or biased data
+
+Looking at the validation data set, 100 variables had all 'nas'. All these variables were removed from the training ('pml.training') and  validation sets.  
+
+After inspecting the data, the non-useful or biased variables were removed. 
+
+Although including the time and num_window variables improve the model, it is assumed they are biased based on experimental design. 
+
+
+```{r removeduseless}
+
+removeIndex <- grep("X|user_name|timestamp|new_window|num_window", names(pml.training))
+pml.training <- pml.training[, -removeIndex]
+validation <- validation[, -removeIndex]
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## Cross - validation
+
+To validate the model, the 'pml.training' dataset was partitioned into a 75% training dataset, and a 25% testing set. 
+
+The dimensions of each of the data sets are below. 
+
+```{r crossval}
+
+set.seed(997)
+inTraining <- createDataPartition(pml.training$classe, p = .75, list = FALSE)
+training <- pml.training[ inTraining,]
+testing  <- pml.training[-inTraining,]
+
+# removing variables where Validation set has all NA values
+training <- training[,!names(training) %in% allNACols]
+testing <- testing[,!names(testing) %in% allNACols]
+validation <- validation[,!names(validation) %in% allNACols]
+
+```
+
+The dimensions of each of the data sets are below. 
+
+```{r dimsummary}
+
+data.frame(numrows = c(nrow(training),nrow(testing),nrow(validation)),numcols = c(ncol(training),ncol(testing),ncol(validation)), row.names = c('training','testing','validation'))
+
+```
+
+## Model
+
+A number of models were trialled, using every remaining variable.
+
+The optimal model was a random forest, with 10-fold cross validation, repeated 10 times. This was chosen for two main reasons: 
+
+1. It is a suitable compromise between accuracy, parsimoniousness and interpretability.  
+2. It is somewhat similar to the optimal model chosen by the original authors (Ross Quinlan's [4] C4.5 decision tree used in connection with the AdaBoost ensemble method.) 
+
+The 10 fold cross validation improved the model slightly when compared with the default randomForest settings. 
+ 
+```{r models}
+
+# K-folds: 
+fitControl <- trainControl(
+  method = "repeatedcv", number = 10, repeats = 10)
+
+# RF with repeated k-fold validation
+ptm <- proc.time()    
+rf.cv.Fit <- randomForest(classe~ .,trControl=fitControl,data=training)
+rf.cv.time <- proc.time() - ptm      
+
+rf.cv.Pred <- predict(rf.cv.Fit,newdata=testing)
+rf.cv.a <- sum((rf.cv.Pred==testing$classe))/nrow(testing) 
+
+```
+
+
+## Interpretation
+
+The most important variables are: 
+
+```{r bestpredictors}
+
+imp <- data.frame(importance(rf.cv.Fit))
+head(imp[order(imp[,"MeanDecreaseGini"], decreasing=TRUE),, drop = FALSE])
+
+```
+
+## Results & Error Rate
+
+Using the Testing dataset, the oob error rate is 1- 0.9965 = 0.0035 = 0.35 %.
+
+```{r outofsampleerror}
+
+rf.cv.Fit
+
+```
+
+
+## Validation set
+The model is applied to the validation set. 
+
+
+```{r validation}
+
+bvPred <- predict(rf.cv.Fit,newdata=validation)
+bvPred
+
+```
+
